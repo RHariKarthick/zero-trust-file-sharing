@@ -14,7 +14,7 @@ This document freezes the shared architecture and interfaces. Implementations mu
 - Use free/open-source packages and Python standard-library features wherever practical.
 - Run locally using SQLite and local disk storage. No cloud runtime or permanent internet connection is required after dependencies are installed.
 - Existing computer, operating system, internet plan for initial package download (if needed), and electricity are assumed available; these are not project software/service purchases.
-- Direct third-party runtime dependencies: `bcrypt`, `cryptography`, and `streamlit`. Pin tested versions and the complete resolved dependency set in `requirements.txt) after implementation; verify a clean virtual-environment install.
+- Direct third-party runtime dependencies: `bcrypt`, `cryptography`, and `streamlit`. Pin tested versions and the complete resolved dependency set in `requirements.txt` after implementation; verify a clean virtual-environment install.
 - Use Python `unittest`; no paid testing service is required.
 - No AI API, public certificate authority, paid TLS certificate, public domain, commercial database, cloud key-management service, cloud storage, or OpenSSL installation is required.
 - Streamlit runs as a local process and is opened in an existing browser; Streamlit-hosted services are not part of the design.
@@ -49,7 +49,7 @@ Branches are created from that commit:
 - `security`: Member 2's `security/`
 - `application`: Member 3's `database/`, `ui/`, and shared documentation
 
-Keep `main` as the integration branch. Do not implement directly on `main). Review changes and test before merging via pull requests. Avoid editing another member's owned modules without coordinating first. This document is initially added to `application`; other branches should refer to the same contract.
+Keep `main` as the integration branch. Do not implement directly on `main`. Review changes and test before merging via pull requests. Avoid editing another member's owned modules without coordinating first. This document is initially added to `application`; other branches should refer to the same contract.
 
 ## 4. Security model and policy
 
@@ -83,7 +83,7 @@ The server—not the UI—enforces permissions on every protected request. For a
 - Passwords: 12–72 UTF-8 bytes. Hash with bcrypt, fresh salt, cost 12. Validate the bcrypt byte limit before hashing.
 - Session token: 32 cryptographically random bytes, URL-safe Base64 without padding (43 characters). Store only the SHA-256 digest of the token. Session lifetime is 8 hours, not sliding; sessions can be revoked.
 - File encryption: AES-256-GCM, fresh 12-byte nonce per encryption. Associated data: `b"ZTSF:v1:" + storage_id.encode("ascii")`.
-- Stored ciphertext format: `b"ZTSF\\x01" + nonce + ciphertext-and-tag`. Authentication/decryption failures raise `EncryptionError`.
+- Stored ciphertext format: `b"ZTSF\x01" + nonce + ciphertext-and-tag`. Authentication/decryption failures raise `EncryptionError`.
 - Integrity: compute SHA-256 on plaintext during upload and verify after decryption. Client also verifies downloaded byte count and SHA-256 before finalizing the destination.
 - Key file: exactly 32 random bytes, generated once, refuses to overwrite existing key, stored outside Git in a user-owned application data directory. Server refuses to start if key is missing/invalid. Back it up securely; losing it makes stored files unrecoverable. Key rotation is out of scope.
 - Never log passwords, tokens, private keys, file contents, or secrets. Do not return stack traces, SQL statements, or private paths to clients.
