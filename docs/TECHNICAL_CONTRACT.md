@@ -19,16 +19,9 @@ This document freezes the shared architecture and interfaces. Implementations mu
 - No AI API, public certificate authority, paid TLS certificate, public domain, commercial database, cloud key-management service, cloud storage, or OpenSSL installation is required.
 - Streamlit runs as a local process and is opened in an existing browser; Streamlit-hosted services are not part of the design.
 
-## 2. Team ownership and import boundaries
+## 2. Integrated architecture and import boundaries
 
-### Member 1 — Networking and transport
-Owns `client/` and `server/`: TCP framing, TLS, local development-certificate tooling, transfer handling, server orchestration, storage files, and first-admin bootstrap.
-
-### Member 2 — Security
-Owns `security/`: password hashing, session tokens, authorization policy, AES-GCM encryption/decryption, SHA-256 integrity, and encryption-key file operations.
-
-### Member 3 — Application and database
-Owns `database/` and `ui/`: SQLite schema/functions, audit persistence, Streamlit UI, and shared contract/setup documentation.
+The repository is implemented and tested as one integrated application. `client/` and `server/` provide transport and orchestration, `security/` provides security primitives and policy, `database/` provides SQLite persistence and audit records, and `ui/` provides the Streamlit interface. These are module boundaries for clarity and testing, not separate implementation assignments or independently integrated deliverables.
 
 Import boundaries:
 - The UI calls only `client.api`; it never accesses SQLite, server storage, decryption, or authorization directly.
@@ -41,15 +34,7 @@ Import boundaries:
 
 ## 3. Repository and branch policy
 
-The approved base commit on `main` at contract approval was:
-`9297fd74c215b7b5add18a70ab79f8e12f112b99`.
-
-Branches are created from that commit:
-- `networking`: Member 1's `client/` and `server/`
-- `security`: Member 2's `security/`
-- `application`: Member 3's `database/`, `ui/`, and shared documentation
-
-Keep `main` as the integration branch. Do not implement directly on `main`. Review changes and test before merging via pull requests. Avoid editing another member's owned modules without coordinating first. This document is initially added to `application`; other branches should refer to the same contract.
+`main` remains stable. Active implementation continues on the existing `application` branch as a single integrated application. Do not create module-owner branches or split implementation by member. Review and test changes before integrating them into `main`; do not change branches or commit/push without the user's approval. Preserve unrelated and uncommitted work.
 
 ## 4. Security model and policy
 
@@ -98,10 +83,34 @@ Use mutual TLS with TLS 1.2 or later:
 - Store CA/server/client private keys and certificates outside the repository. Retain the CA private key securely for issuing client certificates. Certificate-generation functions refuse to overwrite existing outputs.
 - Certificate revocation for this demo is handled by replacing the CA and reissuing certificates; there is no CRL service.
 
-Required environment variables:
-`ZTS_HOST`, `ZTS_PORT`, `ZTS_DB_FILE`, `ZTS_STORAGE_DIR`, `ZTS_CA_CERT_FILE`, `ZTS_TLS_CERT_FILE`, `ZTS_TLS_KEY_FILE`, `ZTS_CLIENT_CERT_FILE`, `ZTS_CLIENT_KEY_FILE`, `ZTS_KEY_FILE`.
+### Configuration and startup
 
-Paths point to local files/directories outside the repository. Use `%LOCALAPPDATA%` on Windows or the user's local data directory on Linux/macOS. Document OS-native permissions for private files.
+`python -m server` is the single documented server startup command and is implemented by `server/__main__.py`. `server.config.load_server_config() -> ServerConfig` reads and validates configuration before any service starts. `ServerConfig` is a frozen dataclass with fields `host: str`, `port: int`, `db_file: Path`, `storage_dir: Path`, `ca_cert_file: Path`, `tls_cert_file: Path`, `tls_key_file: Path`, and `key_file: Path`.
+
+The data directory default is `%LOCALAPPDATA%\\ZeroTrustFileSharing` on Windows (if `LOCALAPPDATA` is unavailable, use `Path.home() / "AppData" / "Local" / "ZeroTrustFileSharing"`) and `Path.home() / ".local" / "share" / "zero-trust-file-sharing"` on Linux/macOS. `ZTS_DATA_DIR` overrides this directory and must be an absolute local path outside the repository. Each path variable below overrides its derived default; overrides must also be absolute local paths outside the repository. Resolve `~`, normalize paths, and reject paths that resolve inside the repository.
+
+| Variable | Default | Required/validated by |
+|---|---|---|
+| `ZTS_DATA_DIR` | OS-specific data directory above | Server and client configuration; absolute, outside repository |
+| `ZTS_HOST` | `localhost` | Server bind host and client TLS hostname; nonempty, resolvable local hostname/IP |
+| `ZTS_PORT` | `8443` | Server and client; base-10 integer in `1..65535` |
+| `ZTS_DB_FILE` | `<ZTS_DATA_DIR>/app.sqlite3` | Server; absolute file path, outside repository; if it exists it must be a regular file; parent is created by SQLite initialization |
+| `ZTS_STORAGE_DIR` | `<ZTS_DATA_DIR>/storage` | Server; absolute directory path, outside repository; if it exists it must be a directory; created at startup |
+| `ZTS_CA_CERT_FILE` | `<ZTS_DATA_DIR>/certs/ca.crt` | Server and client; must exist and be a readable regular file |
+| `ZTS_CA_KEY_FILE` | `<ZTS_DATA_DIR>/certs/ca.key` | Local certificate provisioning only; private file, never needed by server/client runtime |
+| `ZTS_TLS_CERT_FILE` | `<ZTS_DATA_DIR>/certs/server.crt` | Server; must exist and be a readable regular file |
+| `ZTS_TLS_KEY_FILE` | `<ZTS_DATA_DIR>/certs/server.key` | Server; must exist and be a readable regular file |
+| `ZTS_CLIENT_CERT_FILE` | `<ZTS_DATA_DIR>/certs/client.crt` | Client TLS context; must exist and be a readable regular file when the client starts |
+| `ZTS_CLIENT_KEY_FILE` | `<ZTS_DATA_DIR>/certs/client.key` | Client TLS context; must exist and be a readable regular file when the client starts |
+| `ZTS_KEY_FILE` | `<ZTS_DATA_DIR>/secrets/encryption.key` | Server; must exist, be readable, and contain exactly 32 bytes |
+
+Server startup order is fixed: (1) resolve and validate configuration; (2) initialize SQLite; (3) load the existing encryption key with `security.encryption.load_encryption_key` (never generate or replace it during startup); (4) build the mutual-TLS server context; (5) create the storage directory if needed; (6) remove only storage orphans older than one hour by comparing against `database.files.list_storage_ids`; (7) create the first Admin interactively if the database has no users; (8) call `server.app.serve_forever`. `load_server_config()` fills an unset `ZTS_DB_FILE` environment value with its default for the existing database interface; explicitly supplied values are preserved. The resolved storage directory is passed as `ServerConfig.storage_dir` to server storage/handler functions.
+
+Client certificate variables are not required by the server process; they are required when the client TLS context is created. Missing/unreadable required certificates, an invalid certificate/key pair, an invalid/missing encryption key, or invalid configuration stops startup with a safe message naming the failing setting/category but never secret contents or private key material. Startup must not print stack traces or expose local private paths to a remote client. Key/certificate provisioning is a separate local setup step using the contract's free generation functions. The encryption-key generator is exclusive-create only and is never called as an automatic fallback.
+
+`server.__main__.main() -> None` implements the startup sequence. It invokes `database.core.initialize()`, loads the key and TLS context, invokes `server.bootstrap.create_first_admin() -> int | None` (returns the new user ID or `None` when users already exist; only prompts for username/password when no users exist, using `getpass` for the password), and starts the listener. Expected startup errors are reported safely to stderr and exit with status 1.
+
+All private files and directories use OS-native user-only permissions/ACLs. Do not install generated certificates in the OS trust store. The documented defaults are local paths and require no public domain, paid certificate, or online service.
 
 ## 7. TCP protocol
 
@@ -138,13 +147,14 @@ For undecodable control frames, server app makes a best-effort error response wi
 
 - Acquire a connection slot before starting TLS; acquisition is atomic and non-blocking. If all four slots are occupied, immediately close the newly accepted raw socket without starting TLS or sending application data.
 - Each slot is released exactly once in a `finally` block covering TLS handshake, control frames, handler/transfer, and socket closure. If worker startup fails, close the socket and release the slot.
-- TLS handshake timeout: 5 seconds.
+- TLS handshake deadline: 5 seconds on both client and server, measured from immediately before each handshake begins.
 - Control-frame read/write timeout: 10 seconds per complete control frame.
-- Binary transfer timeout: 30 seconds without progress; reset only when bytes are successfully received/sent. This is an inactivity timeout, not a total transfer deadline.
-- Apply handshake timeout before TLS wrapping and the relevant timeout during protocol reads/writes. A stalled operation must not occupy a slot indefinitely.
-- Upload timeout/incomplete transfer discards transfer data and temporary storage, creates no visible file metadata and no success audit. Download timeout closes the connection; client removes its incomplete temporary file.
-- Record a failure audit when an authenticated actor is known and the database remains available.
-- Test simultaneous arrivals, stalled handshakes, control/body stalls, all slot-release paths, and successful subsequent connection after slot release.
+- Binary-transfer inactivity timeout: 30 seconds; reset only after at least one byte is successfully received or sent.
+- Binary-transfer total deadline: 120 seconds, starting immediately before either peer reads or writes the 8-byte binary length prefix, and never reset. This proposed limit is adopted as the project decision for this contract baseline and is represented by the named constant `BINARY_TRANSFER_TOTAL_TIMEOUT_SECONDS = 120`; it is not an environment override. Any value change requires a reviewed contract update and corresponding tests.
+- All deadlines use `time.monotonic()`. The TLS handshake deadline starts immediately before the handshake. For each complete control frame, the absolute deadline starts before its 4-byte length prefix and covers both prefix and JSON body. A new control frame gets a new 10-second deadline. Partial reads/writes never extend a handshake or control-frame absolute deadline. A binary frame enforces both the 120-second total deadline and the 30-second inactivity deadline across its length prefix and complete body; the effective deadline at each I/O step is the earlier of the total deadline and last-progress-time plus 30 seconds. Partial I/O resets the inactivity deadline only when positive byte progress occurs; it never resets the total deadline.
+- Configure the handshake timeout before TLS handshake. Protocol I/O must compute remaining time from monotonic deadlines on every loop iteration; resetting a socket timeout after partial I/O must never extend an absolute deadline. A client handshake timeout closes its one-operation connection and reports a transport error.
+- On any handshake, control-frame, or binary-transfer timeout, close the connection. Upload timeout/incomplete transfer discards buffered data and removes temporary/final ciphertext as appropriate, creates no visible metadata or success audit, and records a failure audit when an authenticated actor is known and the database is available. Download timeout closes the connection and the client removes its incomplete temporary destination file. Slot release remains exactly once on every exit path.
+- Test simultaneous arrivals, stalled handshakes, absolute control-frame deadlines under trickle progress, binary inactivity and total deadlines, timeout cleanup, all slot-release paths, and successful subsequent connection after slot release.
 
 ## 8. Actions and payloads
 
@@ -194,15 +204,20 @@ Download rules:
 
 ## 10. Module files and exact public interfaces
 
-### Member 1: client and server
+### Client and server modules
 
 Files:
 ```text
 client/__init__.py
+client/config.py
+client/tls.py
 client/api.py
 client/transport.py
+client/protocol.py
 client/errors.py
 server/__init__.py
+server/__main__.py
+server/config.py
 server/app.py
 server/protocol.py
 server/handlers.py
@@ -228,6 +243,21 @@ admin_set_user_role(token: str, user_id: int, role: str) -> None
 admin_set_user_active(token: str, user_id: int, is_active: bool) -> None
 ```
 
+Client configuration:
+```python
+# client/config.py
+@dataclass(frozen=True)
+class ClientConfig:
+    host: str
+    port: int
+    ca_cert_file: Path
+    client_cert_file: Path
+    client_key_file: Path
+
+load_client_config() -> ClientConfig
+```
+`load_client_config` reads the same `ZTS_DATA_DIR`, `ZTS_HOST`, `ZTS_PORT`, `ZTS_CA_CERT_FILE`, `ZTS_CLIENT_CERT_FILE`, and `ZTS_CLIENT_KEY_FILE` variables and defaults defined in Section 6. It rejects invalid paths/ports and missing client certificates/keys before opening a connection by raising `client.errors.ClientError("CONFIGURATION_ERROR", safe_message)`.
+
 Client transport:
 ```python
 request_control(request: dict) -> dict
@@ -235,21 +265,39 @@ upload_binary(request: dict, source: BinaryIO, size_bytes: int) -> dict
 download_binary(request: dict, destination: Path) -> dict
 ```
 Each transport function opens exactly one TLS connection, sends one initial control frame, reads the response sequence for the action, and closes in `finally`.
-- `request_control`: one control request and one control response; for actions without binary transfer.
-- `upload_binary`: send upload control, read ready response, send one binary frame, read final response; return final data or raise `ClientError`.
-- `download_binary`: send download control, read metadata, read one binary frame to a temp file beside destination, verify count and digest, atomically rename, return metadata.
+- `request_control`: one control request and one control response for actions without binary transfer; return the validated success `data` object or raise `ClientError` from the server error envelope.
+- `upload_binary`: send upload control; read and validate a successful ready envelope whose `data` is exactly `{"ready": true}` (or raise from its error envelope); send one raw binary frame; then read and validate exactly one final response. A final success has `data` exactly `{"file_id": positive integer, "sha256_hex": lowercase 64-character digest}` and this data object is returned. The client hashes bytes as it sends them and rejects a final digest mismatch with `ClientError("INTEGRITY_FAILURE", ...)`. A final error envelope is raised as `ClientError`; the connection is closed. The server owns cleanup of an incomplete upload.
+- `download_binary`: send download control; read and validate one metadata success envelope with `data` exactly `{"filename": str, "size_bytes": integer in 0..52,428,800, "sha256_hex": lowercase 64-character digest}` (or raise from its error envelope); receive exactly one 8-byte-length-prefixed raw binary frame into an exclusively created temporary file in the destination directory; verify declared and received byte counts and SHA-256 against metadata; flush and close the temporary file; atomically replace the destination only after verification; return metadata. There is no final control response after the binary frame. Any receive, verification, or replacement failure removes the temporary file and preserves an existing destination.
 - `client.api` builds requests and calls exactly one transport function per operation. It does not open sockets.
+
+Client protocol is deliberately separate from `server.protocol`; client modules must not import server modules. The two protocol modules implement byte-for-byte identical framing, JSON decoding rules, size limits, and timeout deadlines from this section. `server.handlers` validates request envelopes and creates response envelopes; `client.transport` validates response envelopes and expected response data for each operation. Client wire errors are raised as `client.errors.ClientError(code, safe_message)` using the server's stable codes. Client-local malformed-response failures use `MALFORMED_RESPONSE`; invalid local TLS certificate/key/CA configuration uses `TLS_CONFIGURATION_ERROR`; TLS connection/handshake/peer-verification failures use `TLS_ERROR`; incomplete/timeout I/O uses `TRANSFER_INCOMPLETE`.
+
+```python
+# client/protocol.py; socket helpers do not own/close the socket
+recv_exact(sock: ssl.SSLSocket, size: int) -> bytes
+send_all(sock: ssl.SSLSocket, data: bytes) -> None
+recv_control(sock: ssl.SSLSocket) -> dict
+send_control(sock: ssl.SSLSocket, message: dict) -> None
+recv_binary(sock: ssl.SSLSocket, destination: BinaryIO, expected_size: int) -> tuple[int, str]
+send_binary(sock: ssl.SSLSocket, source: BinaryIO, size_bytes: int) -> str
+```
+
+`client.protocol.recv_binary` streams exactly the announced body to `destination` and returns `(received_byte_count, lowercase_sha256_hex)`. `send_binary` requires a seekable binary source, verifies its remaining length equals `size_bytes` before sending the frame, streams exactly that many bytes, and returns the digest of bytes sent. These helpers enforce the same 8-byte header, 50 MiB cap, monotonic 120-second total deadline, and 30-second progress-reset inactivity deadline as the server. Control helpers use one 10-second absolute deadline per complete frame. TLS handshake has one 5-second absolute deadline. A timeout or truncated frame raises `ClientError("TRANSFER_INCOMPLETE", ...)`; no partial destination file is published.
+
+Every response must be a JSON object with exactly the keys `version`, `request_id`, `ok`, and either `data` (when `ok` is exactly `true`) or `error` (when `ok` is exactly `false`). `version` must be integer `1` (booleans are invalid); `request_id` must match the operation's UUIDv4; success `data` must be an object. Error has exactly `code` and `message`, where `code` is from the stable server code list and `message` is a string. Any shape, type, ID, JSON, or unexpected-frame mismatch raises `MALFORMED_RESPONSE`. Server error envelopes are surfaced as `ClientError` with the same stable code and safe message. Login tokens are returned to the caller but never logged.
+
+The client opens a raw TCP socket with a 5-second connect timeout, wraps it using `client.tls.create_client_context` with `server_hostname=config.host` and `do_handshake_on_connect=False`, and completes the TLS handshake against one absolute monotonic 5-second deadline. The context trusts only `ZTS_CA_CERT_FILE`, requires server certificate and hostname verification, and presents the configured device certificate. Each transport function owns one operation-scoped TLS connection and closes the TLS socket in `finally` (or the raw socket if wrapping did not complete). It never retries with verification disabled. Mutual TLS authenticates the device only; application login and server-side session/role authorization remain separate.
 
 Server app:
 ```python
-serve_forever(host: str, port: int, tls_context: ssl.SSLContext) -> None
-handle_connection(raw_sock: socket.socket, peer: tuple[str, int], tls_context: ssl.SSLContext) -> None
+serve_forever(config: ServerConfig, tls_context: ssl.SSLContext, encryption_key: bytes) -> None
+handle_connection(raw_sock: socket.socket, peer: tuple[str, int], config: ServerConfig, tls_context: ssl.SSLContext, encryption_key: bytes) -> None
 ```
-`server.app` accepts connections, enforces four slots/timeouts, wraps TLS, reads exactly one initial control frame, dispatches once, and closes the connection. It calls `server.protocol.recv_control()` once and passes the request and TLS socket to the handler. Release the slot exactly once on every path.
+`server.app` accepts connections, enforces four slots/timeouts, wraps TLS, reads exactly one initial control frame, dispatches once, and closes the connection. It calls `server.protocol.recv_control()` once and passes the request, TLS socket, config, and already-loaded encryption key to the handler. Release the slot exactly once on every path. The key is loaded once at startup and passed explicitly; it is not stored in a module global or reloaded per transfer.
 
 Server handler:
 ```python
-handle_request(request: dict, peer: tuple[str, int], conn: ssl.SSLSocket) -> None
+handle_request(request: dict, peer: tuple[str, int], conn: ssl.SSLSocket, config: ServerConfig, encryption_key: bytes) -> None
 ```
 The handler validates request/session/permissions, orchestrates control response sequences and transfers, and calls database/security/storage modules. It does not accept sockets or wrap TLS.
 
@@ -265,19 +313,23 @@ send_binary(sock: ssl.SSLSocket, source: BinaryIO, size_bytes: int) -> None
 
 Server storage:
 ```python
+initialize_storage(storage_dir: Path) -> None
 new_storage_id() -> str
-write_encrypted(storage_id: str, ciphertext: bytes) -> None
-read_encrypted(storage_id: str) -> bytes
-remove_storage_object(storage_id: str) -> None
-cleanup_orphans(referenced_storage_ids: set[str], older_than_epoch: int) -> int
+write_encrypted(storage_dir: Path, storage_id: str, ciphertext: bytes) -> None
+read_encrypted(storage_dir: Path, storage_id: str) -> bytes
+remove_storage_object(storage_dir: Path, storage_id: str) -> None
+cleanup_orphans(storage_dir: Path, referenced_storage_ids: set[str], older_than_epoch: int) -> int
 ```
 
 TLS:
 ```python
+# server/tls.py
 create_server_context(cert_file: Path, key_file: Path, ca_file: Path) -> ssl.SSLContext
+
+# client/tls.py
 create_client_context(ca_file: Path, client_cert_file: Path, client_key_file: Path) -> ssl.SSLContext
 ```
-The client transport uses `server_hostname=ZTS_HOST` so hostname validation occurs.
+The client transport loads `ClientConfig` from `client.config.load_client_config()`, uses `client.tls.create_client_context`, and passes `server_hostname=ZTS_HOST` so hostname validation occurs. Client modules never import server modules.
 
 Development certificate tooling:
 ```python
@@ -289,18 +341,40 @@ All generation functions refuse to overwrite existing outputs.
 
 Bootstrap:
 ```python
-create_first_admin(username: str, password: str) -> int
+create_first_admin() -> int | None
 ```
-Prompt securely for the first Admin password in the terminal; only create the first account if no users exist. No hardcoded credentials.
+Only create the first account if no users exist. Prompt for username and password in the terminal, reading the password with `getpass`; return the new user ID or `None` when an account already exists. No hardcoded credentials.
+
+Configuration:
+```python
+# server/config.py
+@dataclass(frozen=True)
+class ServerConfig:
+    host: str
+    port: int
+    db_file: Path
+    storage_dir: Path
+    ca_cert_file: Path
+    tls_cert_file: Path
+    tls_key_file: Path
+    key_file: Path
+
+load_server_config() -> ServerConfig
+
+# server/__main__.py
+main() -> None
+```
+`load_server_config` reads `os.environ`, applies the defaults and validation in Section 6, fills an unset `ZTS_DB_FILE` with its default for the existing database interface, and raises `server.errors.ConfigurationError(message: str)` for invalid settings. No secret values are included in the error. `main()` catches expected configuration, database, encryption-key, and TLS startup failures, writes a safe category message to stderr, and exits with status 1.
 
 Exceptions:
 - `client.errors.ClientError(code: str, message: str)`
 - `server.errors.ProtocolError(code: str, message: str, request_id: str | None = None)`
 - `server.errors.StorageError(message: str)`
 - `server.errors.RequestError(code: str, message: str)`
+- `server.errors.ConfigurationError(message: str)`
 - Protocol errors cover framing/parsing/transfer errors. Storage errors map to `STORAGE_ERROR`; request errors carry a stable wire code.
 
-### Member 2: security
+### Security modules
 
 Files:
 ```text
@@ -345,7 +419,7 @@ create_encryption_key_file(path: Path) -> None
 ```
 `validate_session` returns `{user_id, username, role}` or raises `SessionError`.
 
-### Member 3: database and UI
+### Database and UI modules
 
 Files:
 ```text
@@ -464,7 +538,8 @@ Audit detail is safe metadata only. Audit outcomes are `success`, `denied`, or `
 Local `unittest` coverage must include:
 
 - Fragmented socket reads/writes, malformed/oversized headers and JSON, truncation at header/body boundaries, size mismatch, and connection cap.
-- Stalled TLS handshake, concurrent arrivals, stalled control reads/writes, stalled upload/download bodies, timeout cleanup, and exact slot release after normal completion and every error path.
+- Stalled TLS handshake, concurrent arrivals, trickle-progress control-frame absolute deadlines, binary inactivity and total deadlines, timeout cleanup, and exact slot release after normal completion and every error path.
+- Startup configuration defaults/overrides, invalid ports and paths, missing/invalid CA/server certificates and encryption key, existing database initialization, and first-admin bootstrap behavior.
 - All actions, response shapes, stable errors, login/logout, session expiry/revocation, and inactive-account behavior.
 - Admin/User permission matrix, ownership, grant/revocation, and non-disclosing file access errors.
 - bcrypt match/mismatch; AES-GCM round-trip and modified ciphertext/nonce/AAD rejection; SHA-256 mismatch.
@@ -473,13 +548,13 @@ Local `unittest` coverage must include:
 - Mutual TLS: reject untrusted server, hostname mismatch, and missing/untrusted client certificate.
 - Clean virtual-environment dependency installation and end-to-end local demo.
 
-Integration order:
-1. Contract approved and frozen.
-2. Member 2 implements security modules against this contract.
-3. Member 3 implements SQLite, audit, Streamlit, and setup/integration docs against these interfaces.
-4. Member 1 implements client/server protocol, TLS/cert tooling, storage, and bootstrap against these interfaces.
-5. Integrate locally and resolve interface mismatches before expanding scope.
-6. Run tests and a clean install, then complete end-to-end demo.
+Integrated implementation order:
+1. Freeze the shared contract before changing dependent modules.
+2. Implement and test independent database and security primitives.
+3. Implement local TLS/certificate tooling, configuration, key loading, startup, storage, and bootstrap.
+4. Implement and test protocol framing, timeout/connection limits, server handlers, and client transport together against the shared interfaces.
+5. Integrate the Streamlit UI through `client.api`, then resolve interface mismatches and run end-to-end tests.
+6. Verify a clean install and complete the local demonstration and documentation.
 
 Documentation must cover free local setup, certificate/key generation, environment variables, key backup, startup/shutdown, tests, locally created demo accounts, upload/share/revoke/download, and troubleshooting. Never commit keys or certificates.
 

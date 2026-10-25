@@ -148,7 +148,10 @@ activemq-data/
 *.sage.py
 
 # Environments
+# Local environment secrets
 .env
+.env.*
+!.env.example
 .envrc
 .venv
 env/
@@ -216,3 +219,24 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local Zero Trust application state and provisioning output
+.venv*/
+**/certs/
+**/secrets/
+*.key
+*.pem
+*.crt
+*.cer
+*.p12
+*.pfx
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.db
+storage/
+uploads/
+/work-tmp/clean-install-venv/
+/work-tmp/pip-*/
+/work-tmp/tmpocz0yrc7/
